@@ -35,7 +35,6 @@ type redisConnection struct {
 	Port string
 	Password string
 	DB int
-	Cache *requestJson
 	Request chan *requestJson
 }
 
@@ -51,19 +50,18 @@ func createRedisConnection(host,port,password string) redisConnection {
 }
 
 
-func (con *redisConnection) redisProcess() (list []string,err error) {
+func (con *redisConnection) redisProcess(requestJson *requestJson) (list []string,err error) {
 	var response string
-	con.Cache = <- con.Request
 	client := redis.NewClient(&redis.Options{
 		Addr:     con.Host + ":"+con.Port,
 		Password: "",
 		DB:       0,
 	})
-	switch con.Cache.Command.Method {
+	switch requestJson.Command.Method {
 	case "GET":
-		response, err = client.Get(con.Cache.Command.Key).Result()
+		response, err = client.Get(requestJson.Command.Key).Result()
 	case "SET":
-		response, err = client.Set(con.Cache.Command.Key, con.Cache.Command.Value, con.Cache.Command.Time*time.Second).Result()
+		response, err = client.Set(requestJson.Command.Key, requestJson.Command.Value, requestJson.Command.Time*time.Second).Result()
 	}
 	list = append(list, response)
 	return list, err
@@ -112,16 +110,15 @@ func rootHandler(response http.ResponseWriter, request *http.Request) {
 func chanProcess(response http.ResponseWriter, con redisConnection) {
 	response.Header().Set("Content-Type", "application/json")
 	response.WriteHeader(http.StatusOK)
-
-	redisOutput, err := con.redisProcess()
+	cache := <- con.Request
+	redisOutput, err := con.redisProcess(cache)
 
 	if err != nil {
 		output := strings.Split(err.Error(), " ")
 		if output[0] == "MOVED" {
 			redirectConn := redisConnMap[redisMappingDev[output[2]]]
 			redirectConn = createRedisConnection(redirectConn.Host, redirectConn.Port, redirectConn.Password)
-			redirectConn.Request <- con.Cache
-			redisOutput, err = redirectConn.redisProcess()
+			redisOutput, err = redirectConn.redisProcess(cache)
 		}
 	}
 
