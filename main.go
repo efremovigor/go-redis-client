@@ -9,7 +9,10 @@ import (
 	"github.com/go-redis/redis"
 	"encoding/json"
 	"time"
+	"strings"
 )
+
+const DEV  = true
 
 type responseJson struct {
 	Code      int      `json:"code"`
@@ -32,30 +35,10 @@ type redisConnection struct {
 	Port string
 	Password string
 	DB int
+	Cache *requestJson
 	Request chan *requestJson
 }
 
-var redisMappingDevList = map[string]string{
-	"10.20.29.11:6379":  "95.213.208.34:6380",
-	"10.20.29.143:6379": "95.213.208.34:6381",
-	"10.20.30.11:6379":  "95.213.208.34:6382",
-	"10.20.28.10:6379":  "95.213.208.34:6383",
-	"10.20.28.11:6379":  "95.213.208.34:6384",
-	"10.20.28.12:6379":  "95.213.208.34:6385",
-}
-
-var redisConn1 = createRedisConnection("95.213.208.34","6380","")
-var redisConn2 = createRedisConnection("95.213.208.34","6380","")
-var redisConn3 = createRedisConnection("95.213.208.34","6380","")
-var redisConn4 = createRedisConnection("95.213.208.34","6380","")
-var redisConn5 = createRedisConnection("95.213.208.34","6380","")
-var redisConn6 = createRedisConnection("95.213.208.34","6380","")
-
-func createRequestJson() requestJson {
-	requestJson := requestJson{}
-	requestJson.Command.Time = 0
-	return requestJson
-}
 
 func createRedisConnection(host,port,password string) redisConnection {
 	redisConnection := redisConnection{}
@@ -67,26 +50,62 @@ func createRedisConnection(host,port,password string) redisConnection {
 	return redisConnection
 }
 
+
+func (con *redisConnection) redisProcess() (list []string,err error) {
+	var response string
+	con.Cache = <- con.Request
+	client := redis.NewClient(&redis.Options{
+		Addr:     con.Host + ":"+con.Port,
+		Password: "",
+		DB:       0,
+	})
+	switch con.Cache.Command.Method {
+	case "GET":
+		response, err = client.Get(con.Cache.Command.Key).Result()
+	case "SET":
+		response, err = client.Set(con.Cache.Command.Key, con.Cache.Command.Value, con.Cache.Command.Time*time.Second).Result()
+	}
+	list = append(list, response)
+	return list, err
+}
+
+
+var redisMappingDev = map[string]string{
+	"10.20.29.11:6379":  "95.213.208.34:6380",
+	"10.20.29.143:6379": "95.213.208.34:6381",
+	"10.20.30.11:6379":  "95.213.208.34:6382",
+	"10.20.28.10:6379":  "95.213.208.34:6383",
+	"10.20.28.11:6379":  "95.213.208.34:6384",
+	"10.20.28.12:6379":  "95.213.208.34:6385",
+}
+
+var redisConnMap = map[string]redisConnection{
+	"95.213.208.34:6380" : createRedisConnection("95.213.208.34","6380",""),
+	"95.213.208.34:6381" : createRedisConnection("95.213.208.34","6381",""),
+	"95.213.208.34:6382" : createRedisConnection("95.213.208.34","6382",""),
+	"95.213.208.34:6383" : createRedisConnection("95.213.208.34","6383",""),
+	"95.213.208.34:6384" : createRedisConnection("95.213.208.34","6384",""),
+	"95.213.208.34:6385" : createRedisConnection("95.213.208.34","6385",""),
+}
+
+func createRequestJson() requestJson {
+	requestJson := requestJson{}
+	requestJson.Command.Time = 0
+	return requestJson
+}
+
 func rootHandler(response http.ResponseWriter, request *http.Request) {
 	request.ParseForm()
-	var requestJson = createRequestJson()
+	requestJson := createRequestJson()
 	json.Unmarshal([]byte(request.Form.Get("json")), &requestJson)
 	json.NewDecoder(request.Body).Decode(&requestJson)
 
-
-	select {
-	case redisConn1.Request <-&requestJson:
-		chanProcess(response, redisConn1 )
-	case redisConn2.Request <-&requestJson:
-		chanProcess(response, redisConn2)
-	case redisConn3.Request <-&requestJson:
-		chanProcess(response, redisConn3)
-	case redisConn4.Request <-&requestJson:
-		chanProcess(response, redisConn4)
-	case redisConn5.Request <-&requestJson:
-		chanProcess(response, redisConn5 )
-	case redisConn6.Request <-&requestJson:
-		chanProcess(response, redisConn6)
+	for _ ,conn := range redisConnMap {
+		select {
+		case conn.Request <-&requestJson:
+			chanProcess(response, conn)
+			return
+		}
 	}
 }
 
@@ -94,10 +113,22 @@ func chanProcess(response http.ResponseWriter, con redisConnection) {
 	response.Header().Set("Content-Type", "application/json")
 	response.WriteHeader(http.StatusOK)
 
+	redisOutput, err := con.redisProcess()
+
+	if err != nil {
+		output := strings.Split(err.Error(), " ")
+		if output[0] == "MOVED" {
+			redirectConn := redisConnMap[redisMappingDev[output[2]]]
+			redirectConn = createRedisConnection(redirectConn.Host, redirectConn.Port, redirectConn.Password)
+			redirectConn.Request <- con.Cache
+			redisOutput, err = redirectConn.redisProcess()
+		}
+	}
+
 	jsonData, _ := json.Marshal(responseJson{
 		Code:      http.StatusOK,
 		Status:    http.StatusText(http.StatusOK),
-		Data:      con.redisProcess(<-con.Request),
+		Data:      redisOutput,
 		DebugInfo: []string{con.Host + ":"+con.Port},
 	})
 
@@ -105,37 +136,18 @@ func chanProcess(response http.ResponseWriter, con redisConnection) {
 	fmt.Fprint(response, string(jsonData))
 }
 
-func (con redisConnection) redisProcess(requestJson *requestJson) (list []string) {
-	var response string
-	var err error
-	client := redis.NewClient(&redis.Options{
-		Addr:     con.Host + ":"+con.Port,
-		Password: "", // no password set
-		DB:       0,  // use default DB
-	})
-	switch requestJson.Command.Method {
-	case "GET":
-		response, err = client.Get(requestJson.Command.Key).Result()
-	case "SET":
-		response, err = client.Set(requestJson.Command.Key, requestJson.Command.Value, requestJson.Command.Time*time.Second).Result()
-	}
-	fmt.Println(err)
-	list = append(list, response)
-	return
-}
-
 func main() {
 	http.HandleFunc("/", rootHandler)
 		go func() {
-			for i := 0; i < 1000; i++ {
+			for i := 27800; i < 30000; i++ {
 
 			resp, _ := http.PostForm("http://127.0.0.1:8080", url.Values{"json": {"{\"command\":{\"method\":\"GET\",\"key\":\"foo"+string(i)+"\"}}"}})
 			responseData, _ := ioutil.ReadAll(resp.Body)
 			responseString := string(responseData)
 			fmt.Println(responseString)
 
-			//resp, _ = http.PostForm("http://127.0.0.1:8080", url.Values{"json": {"{\"command\":{\"method\":\"SET\",\"key\":\"foo27802\",\"value\":\"супер-креветка\",\"time\":0}}"}})
-
+			//resp, _ = http.PostForm("http://127.0.0.1:8080", url.Values{"json": {"{\"command\":{\"method\":\"SET\",\"key\":\"foo"+string(i)+"\",\"value\":\"супер-креветка\",\"time\":0}}"}})
+			//
 			//resp, _ = http.PostForm("http://127.0.0.1:8080", url.Values{"json": {"{\"command\":{\"method\":\"GET\",\"key\":\"foo27802\"}}"}})
 			//responseData, _ = ioutil.ReadAll(resp.Body)
 			//responseString = string(responseData)
