@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/url"
 	"io/ioutil"
-	"github.com/go-redis/redis"
 	"encoding/json"
 	"time"
 	"strings"
@@ -21,6 +20,10 @@ type responseJson struct {
 	DebugInfo []string `json:"debugInfo"`
 }
 
+func (res *responseJson) addDebugMsg (msg string)  {
+	res.DebugInfo = append(res.DebugInfo,msg)
+}
+
 type requestJson struct {
 	Command struct {
 		Method string        `json:"method"`
@@ -29,44 +32,6 @@ type requestJson struct {
 		Time   time.Duration `json:"time"`
 	} `json:"command"`
 }
-
-type redisConnection struct {
-	Host string
-	Port string
-	Password string
-	DB int
-	Request chan *requestJson
-}
-
-
-func createRedisConnection(host,port,password string) redisConnection {
-	redisConnection := redisConnection{}
-	redisConnection.Host = host
-	redisConnection.Port = port
-	redisConnection.Request = make(chan *requestJson, 1)
-	redisConnection.DB = 0
-	redisConnection.Password = password
-	return redisConnection
-}
-
-
-func (con *redisConnection) redisProcess(requestJson *requestJson) (list []string,err error) {
-	var response string
-	client := redis.NewClient(&redis.Options{
-		Addr:     con.Host + ":"+con.Port,
-		Password: "",
-		DB:       0,
-	})
-	switch requestJson.Command.Method {
-	case "GET":
-		response, err = client.Get(requestJson.Command.Key).Result()
-	case "SET":
-		response, err = client.Set(requestJson.Command.Key, requestJson.Command.Value, requestJson.Command.Time*time.Second).Result()
-	}
-	list = append(list, response)
-	return list, err
-}
-
 
 var redisMappingDev = map[string]string{
 	"10.20.29.11:6379":  "95.213.208.34:6380",
@@ -108,27 +73,28 @@ func rootHandler(response http.ResponseWriter, request *http.Request) {
 }
 
 func chanProcess(response http.ResponseWriter, con redisConnection) {
-	response.Header().Set("Content-Type", "application/json")
-	response.WriteHeader(http.StatusOK)
+	var responseJson responseJson
 	cache := <- con.Request
 	redisOutput, err := con.redisProcess(cache)
-
 	if err != nil {
-		output := strings.Split(err.Error(), " ")
-		if output[0] == "MOVED" {
-			redirectConn := redisConnMap[redisMappingDev[output[2]]]
+		responseJson.addDebugMsg(err.Error())
+		redisOutputSlice := strings.Split(err.Error(), " ")
+		if redisOutputSlice[0] == "MOVED" {
+			redirectConn := redisConnMap[redisMappingDev[redisOutputSlice[2]]]
 			redirectConn = createRedisConnection(redirectConn.Host, redirectConn.Port, redirectConn.Password)
 			redisOutput, err = redirectConn.redisProcess(cache)
+			if err != nil {
+				responseJson.addDebugMsg(err.Error())
+			}
 		}
 	}
+	responseJson.Data = redisOutput
+	responseJson.Code = http.StatusOK
+	responseJson.Status = http.StatusText(http.StatusOK)
+	jsonData, _ := json.Marshal(responseJson)
 
-	jsonData, _ := json.Marshal(responseJson{
-		Code:      http.StatusOK,
-		Status:    http.StatusText(http.StatusOK),
-		Data:      redisOutput,
-		DebugInfo: []string{con.Host + ":"+con.Port},
-	})
-
+	response.Header().Set("Content-Type", "application/json")
+	response.WriteHeader(http.StatusOK)
 	response.Header().Set("Content-Length", fmt.Sprint(len(string(jsonData))))
 	fmt.Fprint(response, string(jsonData))
 }
