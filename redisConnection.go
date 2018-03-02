@@ -5,6 +5,24 @@ import (
     "time"
 )
 
+var redisMappingDev = map[string]string{
+    "10.20.29.11:6379":  "95.213.208.34:6380",
+    "10.20.29.143:6379": "95.213.208.34:6381",
+    "10.20.30.11:6379":  "95.213.208.34:6382",
+    "10.20.28.10:6379":  "95.213.208.34:6383",
+    "10.20.28.11:6379":  "95.213.208.34:6384",
+    "10.20.28.12:6379":  "95.213.208.34:6385",
+}
+
+var redisConnMap = map[string]redisConnection{
+    "95.213.208.34:6380" : createRedisConnection("95.213.208.34","6380",""),
+    "95.213.208.34:6381" : createRedisConnection("95.213.208.34","6381",""),
+    "95.213.208.34:6382" : createRedisConnection("95.213.208.34","6382",""),
+    "95.213.208.34:6383" : createRedisConnection("95.213.208.34","6383",""),
+    "95.213.208.34:6384" : createRedisConnection("95.213.208.34","6384",""),
+    "95.213.208.34:6385" : createRedisConnection("95.213.208.34","6385",""),
+}
+
 type redisConnection struct {
     Host string
     Port string
